@@ -1,117 +1,244 @@
-name: Builder
-
-permissions:
-  contents: write
+name: Dobby CMake Build
 
 on:
   push:
-    branches:
-      - master
+  pull_request:
+  workflow_dispatch:
 
-env:
-  CMAKE_VERSION: 3.25.2
-  LLVM_VERSION: 15.0.6
-  NDK_VERSION: r25b
+permissions:
+  contents: read
+
+concurrency:
+  group: dobby-cmake-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  delete_latest_release:
+  android:
+    name: Android (${{ matrix.abi }})
     runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: armeabi-v7a
+            api: 19
+          - abi: arm64-v8a
+            api: 21
+          - abi: x86
+            api: 19
+          - abi: x86_64
+            api: 21
+    env:
+      NDK_VERSION: 30.0.16248370
     steps:
-    - name: checkout master
-      uses: actions/checkout@master
+      - name: Checkout source
+        uses: actions/checkout@v7
 
-    - name: delete latest release
-      uses: dev-drprasad/delete-tag-and-release@v0.2.1
-      with:
-        delete_release: true
-        tag_name: latest
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
 
-  linux_and_android:
+      - name: Install Android NDK
+        run: sdkmanager --install "ndk;${NDK_VERSION}"
+
+      - name: Configure with CMake
+        shell: bash
+        run: |
+          cmake -S . -B "build/android-${{ matrix.abi }}" \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/${NDK_VERSION}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI="${{ matrix.abi }}" \
+            -DANDROID_PLATFORM="android-${{ matrix.api }}" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDOBBY_DEBUG=OFF \
+            -DDOBBY_BUILD_EXAMPLE=OFF \
+            -DDOBBY_BUILD_TEST=OFF \
+            -DPlugin.SymbolResolver=ON
+
+      - name: Build shared and static libraries
+        run: cmake --build "build/android-${{ matrix.abi }}" --parallel 2 --target dobby dobby_static
+
+      - name: Stage Android binaries
+        shell: bash
+        run: |
+          ABI="${{ matrix.abi }}"
+          BUILD_DIR="build/android-${ABI}"
+          mkdir -p "dist/include" "dist/lib/${ABI}"
+          cp include/dobby.h dist/include/
+          cp LICENSE README.md dist/
+          cp "${BUILD_DIR}/libdobby.so" "${BUILD_DIR}/libdobby.a" "dist/lib/${ABI}/"
+          {
+            echo "platform=android"
+            echo "abi=${ABI}"
+            echo "api_level=${{ matrix.api }}"
+            echo "build_type=Release"
+            echo "libraries=libdobby.so,libdobby.a"
+          } > dist/BUILD_INFO.txt
+          file "dist/lib/${ABI}/libdobby.so" "dist/lib/${ABI}/libdobby.a"
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dobby-android-${{ matrix.abi }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  linux:
+    name: Linux (${{ matrix.arch }})
     runs-on: ubuntu-latest
-    needs: delete_latest_release
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            processor: x86_64
+            cc: gcc
+            cxx: g++
+            packages: build-essential
+          - arch: x86
+            processor: i686
+            cc: i686-linux-gnu-gcc
+            cxx: i686-linux-gnu-g++
+            packages: gcc-i686-linux-gnu g++-i686-linux-gnu
+          - arch: arm
+            processor: arm
+            cc: arm-linux-gnueabihf-gcc
+            cxx: arm-linux-gnueabihf-g++
+            packages: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+          - arch: aarch64
+            processor: aarch64
+            cc: aarch64-linux-gnu-gcc
+            cxx: aarch64-linux-gnu-g++
+            packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
     steps:
-    - name: checkout master
-      uses: actions/checkout@master
+      - name: Checkout source
+        uses: actions/checkout@v7
 
-    - name: init linux cross compile env
-      run: |
-        sh scripts/setup_linux_cross_compile.sh
-        mkdir -p artifact
-      shell: bash
+      - name: Install compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ${{ matrix.packages }}
 
-    - name: compile linux
-      run: |
-        python3 scripts/platform_builder.py --platform=linux --arch=all --cmake_dir=$HOME/opt/cmake-$CMAKE_VERSION --llvm_dir=$HOME/opt/llvm-$LLVM_VERSION
-        cp include/dobby.h build/linux
-        tar -zcvf build/dobby-linux-all.tar.gz build/linux
-        cp build/dobby-linux-all.tar.gz artifact/
-        
-      shell: bash
-    
-    - name: compile android
-      run: |
-        python3 scripts/platform_builder.py --platform=android --arch=all --cmake_dir=$HOME/opt/cmake-$CMAKE_VERSION --llvm_dir=$HOME/opt/llvm-$LLVM_VERSION --android_ndk_dir=$HOME/opt/ndk-$NDK_VERSION
-        cp include/dobby.h build/android
-        tar -zcvf build/dobby-android-all.tar.gz build/android
-        cp build/dobby-android-all.tar.gz artifact/
-      shell: bash
+      - name: Configure with CMake
+        run: |
+          cmake -S . -B "build/linux-${{ matrix.arch }}" \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR="${{ matrix.processor }}" \
+            -DCMAKE_C_COMPILER="${{ matrix.cc }}" \
+            -DCMAKE_CXX_COMPILER="${{ matrix.cxx }}" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDOBBY_DEBUG=OFF \
+            -DDOBBY_BUILD_EXAMPLE=OFF \
+            -DDOBBY_BUILD_TEST=OFF \
+            -DPlugin.SymbolResolver=ON
 
-    - name: print output
-      run: |
-        ls -lha .
+      - name: Build shared and static libraries
+        run: cmake --build "build/linux-${{ matrix.arch }}" --parallel 2 --target dobby dobby_static
 
-    - name: update release
-      uses: ncipollo/release-action@v1
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        tag: latest
-        body: "a lightweight, multi-platform, multi-architecture exploit hook framework"
-        artifacts: "build/dobby-linux-all.tar.gz,build/dobby-android-all.tar.gz"
-        allowUpdates: true
-        replacesArtifacts: true
+      - name: Stage Linux binaries
+        shell: bash
+        run: |
+          ARCH="${{ matrix.arch }}"
+          BUILD_DIR="build/linux-${ARCH}"
+          mkdir -p dist/include "dist/lib/${ARCH}"
+          cp include/dobby.h dist/include/
+          cp LICENSE README.md dist/
+          cp "${BUILD_DIR}/libdobby.so" "${BUILD_DIR}/libdobby.a" "dist/lib/${ARCH}/"
+          {
+            echo "platform=linux"
+            echo "architecture=${ARCH}"
+            echo "build_type=Release"
+            echo "libraries=libdobby.so,libdobby.a"
+          } > dist/BUILD_INFO.txt
+          file "dist/lib/${ARCH}/libdobby.so" "dist/lib/${ARCH}/libdobby.a"
 
-  macos_and_iphoneos:
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dobby-linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  apple:
+    name: ${{ matrix.platform }} (${{ matrix.arch }})
     runs-on: macos-latest
-    needs: delete_latest_release
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            arch: x86_64
+            processor: x86_64
+            deployment_target: "10.15"
+          - platform: macos
+            arch: arm64
+            processor: arm64
+            deployment_target: "11.0"
+          - platform: iphoneos
+            arch: arm64
+            processor: arm64
+            deployment_target: "12.0"
     steps:
-    - name: checkout dev
-      uses: actions/checkout@master
+      - name: Checkout source
+        uses: actions/checkout@v7
 
-    - name: init macos compile env
-      run: |
-        sh scripts/setup_macos_cross_compile.sh
-        mkdir -p artifact
-      shell: bash
+      - name: Configure with CMake
+        shell: bash
+        run: |
+          BUILD_DIR="build/${{ matrix.platform }}-${{ matrix.arch }}"
+          if [[ "${{ matrix.platform }}" == "iphoneos" ]]; then
+            cmake -S . -B "${BUILD_DIR}" \
+              -DCMAKE_SYSTEM_NAME=iOS \
+              -DCMAKE_OSX_SYSROOT=iphoneos \
+              -DCMAKE_OSX_ARCHITECTURES="${{ matrix.arch }}" \
+              -DCMAKE_SYSTEM_PROCESSOR="${{ matrix.processor }}" \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET="${{ matrix.deployment_target }}" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DDOBBY_DEBUG=OFF \
+              -DDOBBY_BUILD_EXAMPLE=OFF \
+              -DDOBBY_BUILD_TEST=OFF \
+              -DPlugin.SymbolResolver=ON
+          else
+            cmake -S . -B "${BUILD_DIR}" \
+              -DCMAKE_OSX_ARCHITECTURES="${{ matrix.arch }}" \
+              -DCMAKE_SYSTEM_PROCESSOR="${{ matrix.processor }}" \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET="${{ matrix.deployment_target }}" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DDOBBY_DEBUG=OFF \
+              -DDOBBY_BUILD_EXAMPLE=OFF \
+              -DDOBBY_BUILD_TEST=OFF \
+              -DPlugin.SymbolResolver=ON
+          fi
 
-    - name: compile macos
-      run: |
-        python3 scripts/platform_builder.py --platform=macos --arch=all --cmake_dir=$HOME/opt/cmake-$CMAKE_VERSION/CMake.app/Contents
-        cp include/dobby.h build/macos
-        tar -zcvf build/dobby-macos-all.tar.gz build/macos
-        cp build/dobby-macos-all.tar.gz artifact/
-        
-      shell: bash
-    
-    - name: compile iphoneos
-      run: |
-        python3 scripts/platform_builder.py --platform=iphoneos --arch=all --cmake_dir=$HOME/opt/cmake-$CMAKE_VERSION/CMake.app/Contents
-        cp include/dobby.h build/iphoneos
-        tar -zcvf build/dobby-iphoneos-all.tar.gz build/iphoneos
-        cp build/dobby-iphoneos-all.tar.gz artifact/
-      shell: bash
+      - name: Build shared and static libraries
+        run: cmake --build "build/${{ matrix.platform }}-${{ matrix.arch }}" --parallel 3 --target dobby dobby_static
 
-    - name: print output
-      run: |
-        ls -lha .
+      - name: Stage Apple binaries
+        shell: bash
+        run: |
+          PLATFORM="${{ matrix.platform }}"
+          ARCH="${{ matrix.arch }}"
+          BUILD_DIR="build/${PLATFORM}-${ARCH}"
+          mkdir -p dist/include "dist/lib/${PLATFORM}/${ARCH}"
+          cp include/dobby.h dist/include/
+          cp LICENSE README.md dist/
+          cp "${BUILD_DIR}/libdobby.dylib" "${BUILD_DIR}/libdobby.a" "dist/lib/${PLATFORM}/${ARCH}/"
+          {
+            echo "platform=${PLATFORM}"
+            echo "architecture=${ARCH}"
+            echo "deployment_target=${{ matrix.deployment_target }}"
+            echo "build_type=Release"
+            echo "libraries=libdobby.dylib,libdobby.a"
+          } > dist/BUILD_INFO.txt
+          file "dist/lib/${PLATFORM}/${ARCH}/libdobby.dylib" "dist/lib/${PLATFORM}/${ARCH}/libdobby.a"
 
-    - name: update release
-      uses: ncipollo/release-action@v1
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        tag: latest
-        body: "a lightweight, multi-platform, multi-architecture exploit hook framework"
-        artifacts: "build/dobby-macos-all.tar.gz,build/dobby-iphoneos-all.tar.gz"
-        allowUpdates: true
-        replacesArtifacts: true
+      - name: Upload Apple artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dobby-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
