@@ -54,8 +54,11 @@ ldr x1, [sp, #(2 * 8 + 2 * 8 + 30 * 8 + 8 * 16)]
 adrp TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGE
 add TMP_REG_0, TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGEOFF
 #else
-adrp TMP_REG_0, cdecl(common_closure_bridge_handler)
-add TMP_REG_0, TMP_REG_0, :lo12:cdecl(common_closure_bridge_handler)
+// ELF shared objects require a position-independent reference to a
+// default-visible symbol. Resolve the handler through the GOT instead of
+// emitting an absolute ADD_LO12 relocation that lld rejects for .so files.
+adrp TMP_REG_0, :got:cdecl(common_closure_bridge_handler)
+ldr TMP_REG_0, [TMP_REG_0, :got_lo12:cdecl(common_closure_bridge_handler)]
 #endif
 blr TMP_REG_0
 
@@ -96,8 +99,4 @@ ret
 .globl cdecl(closure_bridge_asm_end)
 cdecl(closure_bridge_asm_end):
 
-.data
-.align 8
-common_closure_bridge_handler_addr:
-.quad cdecl(common_closure_bridge_handler)
 #endif
