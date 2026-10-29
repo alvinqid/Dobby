@@ -55,7 +55,20 @@ jobs:
             -DPlugin.SymbolResolver=ON
 
       - name: Build shared and static libraries
-        run: cmake --build "build/android-${{ matrix.abi }}" --parallel 2 --target dobby dobby_static
+        shell: bash
+        run: |
+          set -o pipefail
+          BUILD_DIR="build/android-${{ matrix.abi }}"
+          cmake --build "${BUILD_DIR}" --verbose --parallel 2 --target dobby dobby_static 2>&1 | tee "${BUILD_DIR}/build.log"
+
+      - name: Upload Android build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dobby-build-log-android-${{ matrix.abi }}
+          path: build/android-${{ matrix.abi }}/build.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Stage Android binaries
         shell: bash
@@ -134,7 +147,20 @@ jobs:
             -DPlugin.SymbolResolver=ON
 
       - name: Build shared and static libraries
-        run: cmake --build "build/linux-${{ matrix.arch }}" --parallel 2 --target dobby dobby_static
+        shell: bash
+        run: |
+          set -o pipefail
+          BUILD_DIR="build/linux-${{ matrix.arch }}"
+          cmake --build "${BUILD_DIR}" --verbose --parallel 2 --target dobby dobby_static 2>&1 | tee "${BUILD_DIR}/build.log"
+
+      - name: Upload Linux build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dobby-build-log-linux-${{ matrix.arch }}
+          path: build/linux-${{ matrix.arch }}/build.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Stage Linux binaries
         shell: bash
@@ -214,7 +240,20 @@ jobs:
           fi
 
       - name: Build shared and static libraries
-        run: cmake --build "build/${{ matrix.platform }}-${{ matrix.arch }}" --parallel 3 --target dobby dobby_static
+        shell: bash
+        run: |
+          set -o pipefail
+          BUILD_DIR="build/${{ matrix.platform }}-${{ matrix.arch }}"
+          cmake --build "${BUILD_DIR}" --verbose --parallel 3 --target dobby dobby_static 2>&1 | tee "${BUILD_DIR}/build.log"
+
+      - name: Upload Apple build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dobby-build-log-${{ matrix.platform }}-${{ matrix.arch }}
+          path: build/${{ matrix.platform }}-${{ matrix.arch }}/build.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Stage Apple binaries
         shell: bash
